@@ -175,7 +175,7 @@ server.registerTool(
     return jsonResult({
       ...slimCourse(c),
       teachers: (c.teachers ?? []).map((t: any) => t.display_name),
-      syllabus: htmlToText(c.syllabus_body, 12000) || "(no syllabus posted)",
+      syllabus: htmlToText(c.syllabus_body, 30000) || "(no syllabus posted)",
     });
   })
 );
@@ -697,7 +697,7 @@ server.registerTool(
     }
     lines.push("");
 
-    const syllabus = htmlToText(course.syllabus_body, 12000);
+    const syllabus = htmlToText(course.syllabus_body, 30000);
     if (syllabus) {
       lines.push("## Syllabus");
       lines.push("");
