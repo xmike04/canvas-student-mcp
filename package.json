@@ -1,0 +1,45 @@
+{
+  "name": "canvas-student-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Canvas LMS that works even when your school disables API tokens — session-cookie auth, read-only by design. Courses, assignments, grades, announcements, modules, files, and more, for Claude and any MCP client.",
+  "type": "module",
+  "license": "MIT",
+  "author": "xmike04",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xmike04/canvas-student-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "canvas-lms",
+    "canvas",
+    "claude",
+    "education",
+    "student",
+    "lms"
+  ],
+  "bin": {
+    "canvas-student-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
