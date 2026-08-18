@@ -3,6 +3,9 @@
  * Canvas MCP server — brings live UNT Canvas data (courses, assignments, grades,
  * announcements, modules, pages, files, discussions, quizzes, to-dos) into Claude.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -17,9 +20,23 @@ import {
 import { htmlToText, trimQuotedReply } from "./html.js";
 import { extractFileText } from "./extract.js";
 
+/**
+ * Single source of truth for the version: package.json, one level up from the
+ * compiled dist/ file both in the repo and inside node_modules. Hardcoding it
+ * here meant it silently drifted every time `npm version` bumped the package.
+ */
+function packageVersion(): string {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 const server = new McpServer({
   name: "canvas-student-mcp",
-  version: "1.3.0",
+  version: packageVersion(),
 });
 
 // ---------------------------------------------------------------------------

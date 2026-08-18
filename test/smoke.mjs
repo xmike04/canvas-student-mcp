@@ -6,6 +6,13 @@
  */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PKG_VERSION = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")
+).version;
 
 const EXPECTED_TOOL_COUNT = 30;
 
@@ -54,7 +61,13 @@ rl.on("line", (line) => {
 
   if (msg.id === 1) {
     if (!msg.result?.serverInfo?.name) fail("initialize returned no serverInfo");
-    console.log(`ok: initialize (${msg.result.serverInfo.name} v${msg.result.serverInfo.version})`);
+    // The handshake version is what MCP clients display; it must track
+    // package.json rather than drifting behind an `npm version` bump.
+    const reported = msg.result.serverInfo.version;
+    if (reported !== PKG_VERSION) {
+      fail(`handshake reports v${reported} but package.json says v${PKG_VERSION}`);
+    }
+    console.log(`ok: initialize (${msg.result.serverInfo.name} v${reported}, matches package.json)`);
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
     send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
   }
