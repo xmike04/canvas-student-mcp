@@ -1,10 +1,18 @@
 # Publishes to npm when a version tag is pushed.
 #
-# Setup (one time):
-#   1. Create an npm access token: npmjs.com → Access Tokens → Generate New Token
-#      → "Automation" (bypasses 2FA in CI, which is what CI needs).
-#   2. Add it to this repo: Settings → Secrets and variables → Actions →
-#      New repository secret → name it NPM_TOKEN.
+# Authentication — pick one:
+#
+#   A. Trusted Publishing (recommended; no stored token)
+#      npmjs.com → the package → Settings → Trusted Publisher → add this repo
+#      (xmike04/canvas-student-mcp) and workflow file (release.yml). Then delete
+#      the NPM_TOKEN repo secret. npm authenticates over short-lived OIDC
+#      credentials instead, so there is no long-lived token to leak or rotate.
+#
+#   B. Automation token
+#      npmjs.com → Access Tokens → Generate New Token → **Classic → Automation**.
+#      The type matters: "Publish" tokens still require an interactive one-time
+#      password and fail in CI with `npm error code EOTP`. Store it as the
+#      NPM_TOKEN repo secret (Settings → Secrets and variables → Actions).
 #
 # Releasing:
 #   npm version minor        # bumps package.json, commits, and creates the tag
@@ -12,12 +20,6 @@
 #
 # Running this workflow manually (Actions tab → Release → Run workflow) builds,
 # tests, and inspects the package WITHOUT publishing — useful for a dry run.
-#
-# Optional hardening: once the package exists on npm, configure Trusted
-# Publishing (npmjs.com → package → Settings → Trusted Publisher) to point at
-# this repo and workflow. Then delete the NPM_TOKEN secret and the `env:` block
-# on the publish step — npm authenticates over OIDC instead, with no long-lived
-# token to leak, and provenance is generated automatically.
 
 name: Release
 
@@ -64,10 +66,19 @@ jobs:
       - name: Inspect package contents
         run: npm pack --dry-run
 
+      # Trusted Publishing (OIDC) needs npm 11.5.1+; Node 20 ships npm 10.x.
+      # Harmless when publishing with a token.
+      - name: Use an npm that supports OIDC publishing
+        if: startsWith(github.ref, 'refs/tags/')
+        run: npm install -g npm@latest
+
       - name: Publish to npm
         if: startsWith(github.ref, 'refs/tags/')
         run: npm publish --provenance --access public
         env:
+          # Empty when no NPM_TOKEN secret exists, in which case npm falls back
+          # to OIDC — so this line is safe to keep after moving to Trusted
+          # Publishing, and safe to delete once you have.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
