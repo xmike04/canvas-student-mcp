@@ -120,6 +120,39 @@ async function fetchJson(url: URL): Promise<{ data: unknown; nextUrl: string | n
   return { data, nextUrl };
 }
 
+/**
+ * Download a file from a Canvas-issued URL.
+ *
+ * Token-authenticated sessions get a `verifier=` param that makes file URLs
+ * self-authenticating; cookie-authenticated sessions do not, so the session
+ * cookie has to ride along or Canvas answers 500. Redirects are followed by
+ * hand: file URLs often bounce to a CDN, which must never receive credentials.
+ */
+export async function canvasDownload(fileUrl: string): Promise<Buffer> {
+  const canvasHost = new URL(baseUrl()).host;
+  let url = fileUrl;
+
+  for (let hop = 0; hop < 5; hop++) {
+    const sameHost = new URL(url).host === canvasHost;
+    const res = await fetch(url, {
+      headers: sameHost ? authHeaders() : {},
+      redirect: "manual",
+    });
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) throw new Error(`Canvas redirected (${res.status}) without a location header`);
+      url = new URL(location, url).toString();
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`Download failed (${res.status} ${res.statusText}) for ${new URL(url).pathname}`);
+    }
+    return Buffer.from(await res.arrayBuffer());
+  }
+  throw new Error("Too many redirects while downloading the file");
+}
+
 /** GET a single (non-paginated) resource. */
 export async function canvasGet(path: string, params?: QueryParams): Promise<any> {
   const { data } = await fetchJson(buildUrl(path, params));

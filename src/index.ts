@@ -6,8 +6,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { canvasGet, canvasGetPaginated, baseUrl } from "./canvas.js";
+import { canvasGet, canvasGetPaginated, canvasDownload, baseUrl } from "./canvas.js";
 import { htmlToText, trimQuotedReply } from "./html.js";
+import { extractFileText } from "./extract.js";
 
 const server = new McpServer({
   name: "canvas-student-mcp",
@@ -1067,6 +1068,275 @@ server.registerTool(
       );
     }
     return jsonResult(rows, truncNote(truncated, "planner items"));
+  })
+);
+
+// ---------------------------------------------------------------------------
+// File content extraction
+// ---------------------------------------------------------------------------
+
+const MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024;
+
+/** Fetch a Canvas file's bytes via its (time-limited, pre-authenticated) URL. */
+async function downloadFile(meta: any): Promise<Buffer> {
+  const size = meta.size ?? 0;
+  if (size > MAX_DOWNLOAD_BYTES) {
+    throw new Error(
+      `File is ${(size / 1024 / 1024).toFixed(1)}MB, over the ${MAX_DOWNLOAD_BYTES / 1024 / 1024}MB limit. ` +
+        "Use canvas_get_file_link to download it directly instead."
+    );
+  }
+  return canvasDownload(meta.url);
+}
+
+server.registerTool(
+  "canvas_read_file",
+  {
+    title: "Read a course file's text",
+    description:
+      "Download a Canvas file and extract its text — PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, and " +
+      "plain-text formats. Use this to read syllabi, lecture slides, and handouts. file_id comes from canvas_list_files " +
+      "or a module item's content_id.",
+    inputSchema: {
+      file_id: z.number().describe("Canvas file ID"),
+      max_chars: z.number().min(500).max(100000).optional().describe("Cap on returned text; default 20000"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ file_id, max_chars }) => {
+    const meta = await canvasGet(`/files/${file_id}`);
+    const buf = await downloadFile(meta);
+    const { text, kind, truncated } = await extractFileText(
+      buf,
+      meta.display_name ?? meta.filename ?? "",
+      meta["content-type"],
+      max_chars ?? 20000
+    );
+    return textResult(
+      `# ${meta.display_name}\n` +
+        `_${kind} · ${Math.round((meta.size ?? 0) / 1024)}KB${truncated ? " · truncated" : ""}_\n\n${text}`
+    );
+  })
+);
+
+server.registerTool(
+  "canvas_read_syllabus",
+  {
+    title: "Read a course syllabus (inline or attached file)",
+    description:
+      "Get a course's syllabus as text. Handles both cases automatically: syllabus typed into Canvas, or posted as an " +
+      "attached PDF/Word file (common) — in which case the file is downloaded and its text extracted.",
+    inputSchema: {
+      course_id: z.number().describe("Canvas course ID"),
+      max_chars: z.number().min(500).max(100000).optional().describe("Cap on returned text; default 30000"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ course_id, max_chars }) => {
+    const cap = max_chars ?? 30000;
+    const course = await canvasGet(`/courses/${course_id}`, {
+      "include[]": ["syllabus_body", "teachers"],
+    });
+    const body: string = course.syllabus_body ?? "";
+    const inline = htmlToText(body, cap);
+
+    // A syllabus that is only a file link renders as a short blob of text with
+    // a /files/<id> href — detect that and read the attachment instead.
+    const fileId = body.match(/\/(?:courses\/\d+\/)?files\/(\d+)/)?.[1];
+    const looksLikeLinkOnly = inline.length < 400 && !!fileId;
+
+    if (!looksLikeLinkOnly) {
+      if (!inline) return textResult(`No syllabus posted for ${course.name}.`);
+      return textResult(`# Syllabus — ${course.name}\n\n${inline}`);
+    }
+
+    try {
+      const meta = await canvasGet(`/files/${fileId}`, { location: `course_syllabus_${course_id}` });
+      const buf = await downloadFile(meta);
+      const { text, kind } = await extractFileText(
+        buf,
+        meta.display_name ?? "",
+        meta["content-type"],
+        cap
+      );
+      return textResult(
+        `# Syllabus — ${course.name}\n` +
+          `_Extracted from attached file: ${meta.display_name} (${kind})_\n\n${text}`
+      );
+    } catch (e) {
+      return textResult(
+        `The syllabus for ${course.name} is posted as an attached file (id ${fileId}), but it could not be read: ` +
+          `${e instanceof Error ? e.message : String(e)}\n\nCanvas page: ${baseUrl()}/courses/${course_id}/assignments/syllabus`
+      );
+    }
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Groups, module progress, peer reviews
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "canvas_list_groups",
+  {
+    title: "List my groups",
+    description:
+      "List the Canvas groups you belong to (project teams, study groups, sections) with member counts and their course.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  },
+  safe(async () => {
+    const { items } = await canvasGetPaginated("/users/self/groups");
+    if (!items.length) return textResult("You are not a member of any Canvas groups.");
+    return jsonResult(
+      items.map((g: any) => ({
+        id: g.id,
+        name: g.name,
+        course_id: g.course_id,
+        context: g.context_type,
+        members: g.members_count,
+        description: htmlToText(g.description, 400) || undefined,
+      }))
+    );
+  })
+);
+
+server.registerTool(
+  "canvas_get_module_progress",
+  {
+    title: "Module completion progress",
+    description:
+      "Show module-by-module progress: which modules are locked, started, or completed, and for each item what Canvas " +
+      "requires to mark it done (view it, submit it, contribute, or score a minimum) and whether you've done it.",
+    inputSchema: {
+      course_id: z.number().describe("Canvas course ID"),
+      incomplete_only: z.boolean().optional().describe("Only show items you still need to complete"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ course_id, incomplete_only }) => {
+    const { items, truncated } = await canvasGetPaginated(`/courses/${course_id}/modules`, {
+      "include[]": ["items", "content_details"],
+    });
+
+    const describeRequirement = (r: any): string | undefined => {
+      if (!r) return undefined;
+      switch (r.type) {
+        case "must_view":
+          return "view it";
+        case "must_submit":
+          return "submit it";
+        case "must_contribute":
+          return "post a contribution";
+        case "must_mark_done":
+          return "mark it done";
+        case "min_score":
+          return `score at least ${r.min_score}`;
+        default:
+          return r.type;
+      }
+    };
+
+    const rows = items
+      .map((m: any) => {
+        const modItems = (m.items ?? [])
+          .map((i: any) => ({
+            type: i.type,
+            title: i.title,
+            requirement: describeRequirement(i.completion_requirement),
+            completed: i.completion_requirement ? Boolean(i.completion_requirement.completed) : undefined,
+            due_at: i.content_details?.due_at ?? undefined,
+            points_possible: i.content_details?.points_possible ?? undefined,
+            locked: i.content_details?.locked_for_user || undefined,
+            url: i.html_url,
+          }))
+          .filter((i: any) => !incomplete_only || (i.requirement && !i.completed));
+
+        const required = (m.items ?? []).filter((i: any) => i.completion_requirement);
+        const done = required.filter((i: any) => i.completion_requirement.completed);
+
+        return {
+          module: m.name,
+          state: m.state ?? "no requirements",
+          completed_at: m.completed_at ?? undefined,
+          progress: required.length ? `${done.length}/${required.length} requirements met` : undefined,
+          unlock_at: m.unlock_at ?? undefined,
+          sequential: m.require_sequential_progress || undefined,
+          items: modItems,
+        };
+      })
+      .filter((m: any) => !incomplete_only || m.items.length > 0);
+
+    if (!rows.length) {
+      return textResult(
+        incomplete_only
+          ? "No outstanding module requirements — everything with a completion requirement is done."
+          : "This course has no modules."
+      );
+    }
+    return jsonResult(rows, truncNote(truncated, "modules"));
+  })
+);
+
+server.registerTool(
+  "canvas_list_peer_reviews",
+  {
+    title: "List peer reviews assigned to me",
+    description:
+      "Find peer reviews you've been asked to complete, and their status. Scans the course's peer-review assignments; " +
+      "pass assignment_id to check just one.",
+    inputSchema: {
+      course_id: z.number().describe("Canvas course ID"),
+      assignment_id: z.number().optional().describe("Check a single assignment instead of scanning the course"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ course_id, assignment_id }) => {
+    const me = await canvasGet("/users/self/profile");
+
+    let targets: any[];
+    if (assignment_id !== undefined) {
+      targets = [await canvasGet(`/courses/${course_id}/assignments/${assignment_id}`)];
+    } else {
+      const { items } = await canvasGetPaginated(`/courses/${course_id}/assignments`);
+      targets = items.filter((a: any) => a.peer_reviews);
+    }
+
+    if (!targets.length) {
+      return textResult("No peer-review assignments in this course.");
+    }
+
+    const out: any[] = [];
+    for (const a of targets) {
+      let reviews: any[] = [];
+      try {
+        ({ items: reviews } = await canvasGetPaginated(
+          `/courses/${course_id}/assignments/${a.id}/peer_reviews`,
+          { "include[]": ["user"] },
+          1
+        ));
+      } catch {
+        continue;
+      }
+      for (const r of reviews) {
+        if (r.assessor_id !== me.id) continue; // only reviews *I* owe
+        out.push({
+          assignment: a.name,
+          assignment_id: a.id,
+          due_at: a.peer_reviews_due_at ?? a.due_at,
+          reviewing: r.user?.display_name ?? `user ${r.user_id}`,
+          state: r.workflow_state,
+          url: `${baseUrl()}/courses/${course_id}/assignments/${a.id}/submissions/${r.user_id}`,
+        });
+      }
+    }
+
+    if (!out.length) {
+      return textResult(
+        `Found ${targets.length} peer-review assignment(s), but none are currently assigned to you to review.`
+      );
+    }
+    return jsonResult(out);
   })
 );
 

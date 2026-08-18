@@ -13,13 +13,14 @@ Courses, syllabus, assignments with submission status, grades, announcements, mo
 - **`canvas_grade_breakdown`** — grade breakdown by assignment group plus a what-if calculator. Handles both Canvas grading modes (weighted-by-group and total-points), cross-checks its own math against the score Canvas reports, and surfaces caveats when drop rules or unposted groups make a projection unreliable.
 - **`canvas_list_planner`** — the Canvas planner feed, with new-activity flags and per-item submission state.
 
-## Planned
+### v1.2 — Tier 2 (5 tools)
+- **`canvas_read_file`** — extracts text from course materials. PDFs use `unpdf`; `.docx`, `.pptx`, and `.xlsx` are handled in-repo by a small ZIP reader over Node's built-in `zlib`, since OOXML files are just ZIP archives of XML — three formats, no dependency. Unsupported types fail with a pointer to `canvas_get_file_link` rather than a stack trace.
+- **`canvas_read_syllabus`** — returns the syllabus as text whether it's inline HTML or an attached file, detecting the link-only case and reading the attachment. Validated against all three shapes: PDF attachment, DOCX attachment, and inline text.
+- **`canvas_list_groups`**, **`canvas_get_module_progress`** (completion requirements, with an `incomplete_only` filter), **`canvas_list_peer_reviews`**.
 
-### Tier 2 — content depth
-- **File text extraction.** Syllabi are often posted as PDF/DOCX attachments rather than inline HTML (2 of 3 courses tested). The file API is reachable even where the Files *tab* is restricted, so the content is fetchable; this needs a PDF/DOCX parsing dependency and a size guard.
-- **Groups** (`/users/self/groups`) — group memberships and group discussions.
-- **Module progress** — `content_details` exposes completion requirements and what's left to satisfy them.
-- **Peer reviews** — reachable and empty in current courses; wire up when a course assigns them.
+Building this surfaced a second cookie-auth quirk: Canvas omits the `verifier=` param from file URLs for cookie sessions, so downloads return `500` unless the session cookie is attached. Download redirects are now followed by hand so credentials stop at the Canvas host and are never forwarded to a CDN.
+
+## Planned
 
 ### Tier 3 — distribution & operations
 - **npm publish** so installation is `npx canvas-student-mcp`.

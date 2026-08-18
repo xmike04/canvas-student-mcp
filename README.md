@@ -21,17 +21,18 @@ What that requires under the hood (and what the token-based servers don't do):
 
 - **XSSI guard stripping** — cookie-authenticated Canvas responses are prefixed with `while(1);`, which breaks naive JSON parsing
 - **Login-redirect detection** — expired sessions *redirect* to the login page instead of returning 401; the server catches redirects and non-JSON bodies and tells you exactly how to refresh, instead of failing cryptically
+- **Credentialed file downloads** — token sessions get a `verifier=` param that makes file URLs self-authenticating; cookie sessions don't, so downloads must carry the session cookie (Canvas answers `500` otherwise). Redirects are followed manually so credentials are never forwarded to a CDN
 - **Expiry-aware errors** — every failure mode explains the fix in the error message itself
 
 Design principles that differentiate it beyond auth:
 
 - **Read-only by design.** Every tool is a GET. The server physically cannot submit assignments, post discussions, or modify anything — safe to hand to an autonomous agent.
 - **Context-efficient responses.** Canvas API payloads are enormous; every tool trims to the fields an LLM actually needs, converts HTML to clean text (preserving link URLs), and caps pagination with explicit truncation notices.
-- **Small and auditable.** ~600 lines of strict TypeScript, two runtime dependencies (the MCP SDK and zod). You can read the whole thing before trusting it with your school account.
+- **Small and auditable.** Strict TypeScript, three runtime dependencies (the MCP SDK, zod, and `unpdf` for PDF text). You can read the whole thing before trusting it with your school account.
 
 Token auth is still supported if your school allows it — the cookie is the fallback, not the only path.
 
-## Tools (24)
+## Tools (29)
 
 | Tool | What it does |
 |---|---|
@@ -53,9 +54,16 @@ Token auth is still supported if your school allows it — the cookie is the fal
 | `canvas_get_feedback` | Grader comments and rubric assessments on your submissions |
 | `canvas_grade_breakdown` | Grade by assignment group + **what-if calculator**: "what do I need on the final for an A?" |
 | `canvas_list_planner` | Planner feed with new-activity flags and submission state |
+| `canvas_read_file` | **Extract text from course files** — PDF, Word, PowerPoint, Excel, HTML, plain text |
+| `canvas_read_syllabus` | Syllabus as text, whether it's typed into Canvas or posted as an attached PDF/Word file |
+| `canvas_list_groups` | Your group memberships |
+| `canvas_get_module_progress` | Module completion state and what each item still requires |
+| `canvas_list_peer_reviews` | Peer reviews assigned to you |
 | `canvas_export_course` | One-shot markdown export of an entire course — built for Notion archiving |
 
-Two of these are worth calling out. **`canvas_grade_breakdown`** implements both of Canvas's grading models (weighted-by-group and total-points), cross-checks its arithmetic against the score Canvas itself reports, and tells you when drop rules or unposted assignment groups make a projection unreliable — instead of quietly returning a confident wrong number. **`canvas_get_conversation`** passes `auto_mark_as_read=false`, so an agent reading your inbox doesn't silently mark your messages read; that behavior is verified against a live unread thread, not just assumed.
+Three of these are worth calling out.
+
+**`canvas_read_file`** turns course materials into readable text, which is what makes "quiz me on this week's slides" or "what's the late-work policy" actually work. PDFs go through `unpdf`; Office formats are handled in-repo — `.docx`, `.pptx`, and `.xlsx` are ZIP containers of XML, so a small ZIP reader over Node's built-in `zlib` covers all three with no dependency. `canvas_read_syllabus` builds on it: it detects when a syllabus is only a file link and reads the attachment instead, which is the common case (2 of the 3 courses tested). **`canvas_grade_breakdown`** implements both of Canvas's grading models (weighted-by-group and total-points), cross-checks its arithmetic against the score Canvas itself reports, and tells you when drop rules or unposted assignment groups make a projection unreliable — instead of quietly returning a confident wrong number. **`canvas_get_conversation`** passes `auto_mark_as_read=false`, so an agent reading your inbox doesn't silently mark your messages read; that behavior is verified against a live unread thread, not just assumed.
 
 See [ROADMAP.md](ROADMAP.md) for what's planned next and why writes are deliberately out of scope.
 
