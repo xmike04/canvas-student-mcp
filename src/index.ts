@@ -19,7 +19,7 @@ import { extractFileText } from "./extract.js";
 
 const server = new McpServer({
   name: "canvas-student-mcp",
-  version: "1.0.0",
+  version: "1.3.0",
 });
 
 // ---------------------------------------------------------------------------
