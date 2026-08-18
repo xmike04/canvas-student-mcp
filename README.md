@@ -180,10 +180,20 @@ cp -R skills/canvas-morning-check ~/.claude/skills/
 
 ```bash
 npm run build   # strict TypeScript compile
-npm test        # smoke test: MCP handshake, all 19 tools register, error paths
+npm test        # smoke test: MCP handshake, all 30 tools register, error paths
 ```
 
-The smoke test runs entirely offline — CI needs no Canvas account.
+The smoke test runs entirely offline — CI needs no Canvas account, and it sets `CANVAS_NO_KEYCHAIN=1` so a real stored credential can't leak into a test run.
+
+### Releasing
+
+Publishing runs from CI ([`.github/workflows/release.yml`](.github/workflows/release.yml)), so no one publishes from a laptop:
+
+```bash
+npm version minor && git push --follow-tags
+```
+
+Pushing the tag triggers a build, the full test suite, a package-contents inspection, and a guard that the tag matches `package.json` — then publishes with [provenance](https://docs.npmjs.com/generating-provenance-statements), which cryptographically links the published tarball to the commit and workflow that built it. Running the workflow manually from the Actions tab does everything except publish, as a dry run.
 
 ## Security model
 
