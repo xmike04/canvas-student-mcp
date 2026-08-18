@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-const EXPECTED_TOOL_COUNT = 19;
+const EXPECTED_TOOL_COUNT = 24;
 
 const server = spawn("node", ["dist/index.js"], {
   env: {

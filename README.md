@@ -31,7 +31,7 @@ Design principles that differentiate it beyond auth:
 
 Token auth is still supported if your school allows it — the cookie is the fallback, not the only path.
 
-## Tools (19)
+## Tools (24)
 
 | Tool | What it does |
 |---|---|
@@ -49,7 +49,15 @@ Token auth is still supported if your school allows it — the cookie is the fal
 | `canvas_list_quizzes` | Quizzes with due dates, time limits, attempts |
 | `canvas_list_todo` / `canvas_list_upcoming` | Your to-do list and upcoming deadlines |
 | `canvas_list_calendar_events` | Events or assignment deadlines in a date range |
+| `canvas_list_inbox` / `canvas_get_conversation` | Read Canvas inbox threads — **without marking them read** |
+| `canvas_get_feedback` | Grader comments and rubric assessments on your submissions |
+| `canvas_grade_breakdown` | Grade by assignment group + **what-if calculator**: "what do I need on the final for an A?" |
+| `canvas_list_planner` | Planner feed with new-activity flags and submission state |
 | `canvas_export_course` | One-shot markdown export of an entire course — built for Notion archiving |
+
+Two of these are worth calling out. **`canvas_grade_breakdown`** implements both of Canvas's grading models (weighted-by-group and total-points), cross-checks its arithmetic against the score Canvas itself reports, and tells you when drop rules or unposted assignment groups make a projection unreliable — instead of quietly returning a confident wrong number. **`canvas_get_conversation`** passes `auto_mark_as_read=false`, so an agent reading your inbox doesn't silently mark your messages read; that behavior is verified against a live unread thread, not just assumed.
+
+See [ROADMAP.md](ROADMAP.md) for what's planned next and why writes are deliberately out of scope.
 
 ## Quick start
 

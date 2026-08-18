@@ -19,6 +19,32 @@ const ENTITIES: Record<string, string> = {
   "&ldquo;": '"',
 };
 
+/**
+ * Trim quoted reply chains from Canvas conversation messages. Canvas relays
+ * replies sent by email, so each message often carries the entire prior thread
+ * below an Outlook-style separator line.
+ */
+export function trimQuotedReply(body: string | null | undefined, maxLen = 2000): string {
+  if (!body) return "";
+  let text = body;
+
+  const separators = [
+    /\n_{10,}\s*\n/, // Outlook: a run of underscores
+    /\n-{5,}\s*Original Message\s*-{5,}/i,
+    /\nOn .{10,80} wrote:\s*\n/, // Gmail-style attribution
+  ];
+  for (const sep of separators) {
+    const m = text.match(sep);
+    if (m && m.index !== undefined && m.index > 40) {
+      text = text.slice(0, m.index) + "\n[quoted thread trimmed]";
+      break;
+    }
+  }
+
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  return text.length > maxLen ? text.slice(0, maxLen) + "\n… [truncated]" : text;
+}
+
 export function htmlToText(html: string | null | undefined, maxLen = 6000): string {
   if (!html) return "";
 

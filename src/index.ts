@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { canvasGet, canvasGetPaginated, baseUrl } from "./canvas.js";
-import { htmlToText } from "./html.js";
+import { htmlToText, trimQuotedReply } from "./html.js";
 
 const server = new McpServer({
   name: "canvas-student-mcp",
@@ -48,9 +48,13 @@ function safe<A>(fn: (args: A) => Promise<ToolResult>): (args: A) => Promise<Too
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
 
-function truncNote(truncated: boolean, what: string): string | undefined {
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function truncNote(truncated: boolean, what: string, cap = 500): string | undefined {
   return truncated
-    ? `NOTE: result capped at 500 ${what}; narrow the query (course, dates, search) for the rest.`
+    ? `NOTE: result capped at ${cap} ${what}; narrow the query (course, dates, search) for the rest.`
     : undefined;
 }
 
@@ -647,6 +651,422 @@ server.registerTool(
       description: htmlToText(e.description, 500),
     }));
     return jsonResult(rows, truncNote(truncated, "events"));
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Inbox (conversations)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "canvas_list_inbox",
+  {
+    title: "List Canvas inbox messages",
+    description:
+      "List conversations from the Canvas inbox (messages from instructors, TAs, and classmates) with sender, course, " +
+      "preview, and read state. Use scope='unread' for just unread messages.",
+    inputSchema: {
+      scope: z
+        .enum(["inbox", "unread", "starred", "sent", "archived"])
+        .optional()
+        .describe("Which mailbox to list; default 'inbox'"),
+      limit: z.number().min(1).max(50).optional().describe("Max conversations to return; default 20"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ scope, limit }) => {
+    const { items, truncated } = await canvasGetPaginated(
+      "/conversations",
+      { scope: scope && scope !== "inbox" ? scope : undefined, per_page: limit ?? 20 },
+      1
+    );
+    const me = await canvasGet("/users/self/profile").catch(() => null);
+    const rows = items.slice(0, limit ?? 20).map((c: any) => ({
+      id: c.id,
+      subject: c.subject,
+      course: c.context_name,
+      // Drop self from the participant list — the interesting party is the other person.
+      with: (c.participants ?? [])
+        .filter((p: any) => !me || p.id !== me.id)
+        .map((p: any) => p.full_name ?? p.name),
+      unread: c.workflow_state === "unread",
+      starred: c.starred,
+      message_count: c.message_count,
+      last_message_at: c.last_message_at,
+      preview: c.last_message,
+    }));
+    return jsonResult(rows, truncNote(truncated, "conversations", limit ?? 20));
+  })
+);
+
+server.registerTool(
+  "canvas_get_conversation",
+  {
+    title: "Read a conversation thread",
+    description:
+      "Read the full message thread of one conversation, including every reply. Does NOT mark the conversation as read.",
+    inputSchema: {
+      conversation_id: z.number().describe("Conversation ID from canvas_list_inbox"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ conversation_id }) => {
+    // auto_mark_as_read=false keeps this tool genuinely read-only; Canvas would
+    // otherwise flip the conversation to read as a side effect of fetching it.
+    const c = await canvasGet(`/conversations/${conversation_id}`, { auto_mark_as_read: false });
+    const names: Record<number, string> = {};
+    for (const p of c.participants ?? []) names[p.id] = p.full_name ?? p.name;
+    return jsonResult({
+      id: c.id,
+      subject: c.subject,
+      course: c.context_name,
+      participants: Object.values(names),
+      messages: (c.messages ?? []).map((m: any) => ({
+        from: names[m.author_id] ?? `user ${m.author_id}`,
+        sent_at: m.created_at,
+        body: trimQuotedReply(m.body),
+        attachments: (m.attachments ?? []).map((a: any) => a.display_name),
+      })),
+    });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Grader feedback
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "canvas_get_feedback",
+  {
+    title: "Get grader feedback",
+    description:
+      "Get grader comments and rubric assessments on your submissions — what the instructor or TA actually wrote. " +
+      "Omit course_id to check every active course. Only returns submissions that have feedback or a grade.",
+    inputSchema: {
+      course_id: z.number().optional().describe("Limit to one course; default all active courses"),
+      include_empty: z
+        .boolean()
+        .optional()
+        .describe("Include submissions with no feedback and no grade; default false"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ course_id, include_empty }) => {
+    let courses: Array<{ id: number; name: string }>;
+    if (course_id !== undefined) {
+      courses = [{ id: course_id, name: `course ${course_id}` }];
+    } else {
+      const { items } = await canvasGetPaginated("/courses", { enrollment_state: "active" });
+      courses = items.map((c: any) => ({ id: c.id, name: c.name }));
+    }
+
+    const out: any[] = [];
+    for (const course of courses) {
+      let items: any[] = [];
+      try {
+        ({ items } = await canvasGetPaginated(
+          `/courses/${course.id}/students/submissions`,
+          {
+            "student_ids[]": ["self"],
+            "include[]": ["submission_comments", "rubric_assessment", "assignment"],
+          },
+          2
+        ));
+      } catch {
+        continue; // course may restrict submissions; skip quietly
+      }
+
+      for (const s of items) {
+        const comments = (s.submission_comments ?? []).map((c: any) => ({
+          from: c.author_name,
+          at: c.created_at,
+          comment: c.comment,
+        }));
+
+        // rubric_assessment is keyed by criterion id; map ids to their descriptions.
+        const criteria: Record<string, any> = {};
+        for (const c of s.assignment?.rubric ?? []) criteria[c.id] = c;
+        const rubric = Object.entries(s.rubric_assessment ?? {}).map(([id, a]: [string, any]) => ({
+          criterion: criteria[id]?.description ?? id,
+          points: a?.points ?? null,
+          out_of: criteria[id]?.points ?? null,
+          comment: a?.comments || undefined,
+        }));
+
+        const hasFeedback = comments.length > 0 || rubric.length > 0 || s.score != null;
+        if (!hasFeedback && !include_empty) continue;
+
+        out.push({
+          course: course.name,
+          assignment: s.assignment?.name,
+          assignment_id: s.assignment_id,
+          score: s.score,
+          grade: s.grade,
+          points_possible: s.assignment?.points_possible,
+          graded_at: s.graded_at,
+          late: s.late,
+          missing: s.missing,
+          ...(comments.length ? { comments } : {}),
+          ...(rubric.length ? { rubric } : {}),
+        });
+      }
+    }
+
+    if (out.length === 0) {
+      return textResult(
+        "No grader feedback yet — nothing has been graded, and no comments have been left on your submissions."
+      );
+    }
+    return jsonResult(out);
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Grade breakdown / what-if calculator
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "canvas_grade_breakdown",
+  {
+    title: "Grade breakdown & what-if calculator",
+    description:
+      "Break a course grade down by assignment group (with weights), showing what's graded, what's left, and your current standing. " +
+      "Pass target_grade (e.g. 90) to compute the average you need on all remaining work to finish at that grade.",
+    inputSchema: {
+      course_id: z.number().describe("Canvas course ID"),
+      target_grade: z
+        .number()
+        .min(0)
+        .max(150)
+        .optional()
+        .describe("Desired final percentage, e.g. 90 for an A"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ course_id, target_grade }) => {
+    const [course, groupsRes] = await Promise.all([
+      canvasGet(`/courses/${course_id}`, { "include[]": ["total_scores"] }),
+      canvasGetPaginated(`/courses/${course_id}/assignment_groups`, {
+        "include[]": ["assignments", "submission"],
+      }),
+    ]);
+
+    const weighted = course.apply_assignment_group_weights === true;
+    const caveats: string[] = [];
+
+    const groups = groupsRes.items.map((g: any) => {
+      let earned = 0;
+      let gradedPossible = 0;
+      let remaining = 0;
+
+      for (const a of g.assignments ?? []) {
+        // Mirror Canvas's own exclusions from the final grade.
+        if (a.omit_from_final_grade || a.published === false || a.hide_in_gradebook) continue;
+        const pts = a.points_possible ?? 0;
+        if (pts <= 0) continue;
+        const s = a.submission;
+        if (s?.excused) continue;
+        if (s && s.workflow_state === "graded" && s.score != null) {
+          earned += s.score;
+          gradedPossible += pts;
+        } else {
+          remaining += pts;
+        }
+      }
+
+      return {
+        name: g.name,
+        weight: weighted ? g.group_weight : null,
+        earned,
+        graded_possible: gradedPossible,
+        remaining_points: remaining,
+        percentage: gradedPossible > 0 ? round2((earned / gradedPossible) * 100) : null,
+      };
+    });
+
+    const totalGradedPossible = groups.reduce((n, g) => n + g.graded_possible, 0);
+    const totalEarned = groups.reduce((n, g) => n + g.earned, 0);
+    const totalRemaining = groups.reduce((n, g) => n + g.remaining_points, 0);
+
+    // ---- current standing --------------------------------------------------
+    let current: number | null = null;
+    if (weighted) {
+      // Canvas normalizes weights across groups that actually have graded work.
+      const active = groups.filter((g) => g.graded_possible > 0 && (g.weight ?? 0) > 0);
+      const weightSum = active.reduce((n, g) => n + (g.weight ?? 0), 0);
+      if (weightSum > 0) {
+        current = round2(
+          active.reduce((n, g) => n + (g.weight ?? 0) * (g.earned / g.graded_possible), 0) / weightSum * 100
+        );
+      }
+    } else if (totalGradedPossible > 0) {
+      current = round2((totalEarned / totalGradedPossible) * 100);
+    }
+
+    const canvasScore = course.enrollments?.[0]?.computed_current_score ?? null;
+    if (current != null && canvasScore != null && Math.abs(current - canvasScore) > 0.6) {
+      caveats.push(
+        `Computed current grade (${current}%) differs from the score Canvas reports (${canvasScore}%). ` +
+          "Canvas may apply drop rules or late penalties this calculation doesn't model — trust Canvas for the official number."
+      );
+    }
+    if (weighted) {
+      const emptyWeighted = groups.filter((g) => (g.weight ?? 0) > 0 && g.graded_possible + g.remaining_points === 0);
+      if (emptyWeighted.length) {
+        caveats.push(
+          `These weighted groups have no assignments posted yet: ${emptyWeighted.map((g) => `${g.name} (${g.weight}%)`).join(", ")}. ` +
+            "Projections will shift once the instructor posts them."
+        );
+      }
+    }
+    if (groupsRes.items.some((g: any) => Object.keys(g.rules ?? {}).length > 0)) {
+      caveats.push("One or more groups have drop/keep rules (e.g. drop lowest score) that this calculation ignores.");
+    }
+
+    // ---- what-if -----------------------------------------------------------
+    let whatIf: any = undefined;
+    if (target_grade !== undefined) {
+      if (totalRemaining <= 0) {
+        whatIf = {
+          target: target_grade,
+          achievable: current != null ? current >= target_grade : null,
+          note: "No ungraded work remains, so the grade can no longer change.",
+        };
+      } else if (weighted) {
+        // final = A + B*p, where p is the uniform fraction earned on remaining work.
+        const contributing = groups.filter(
+          (g) => (g.weight ?? 0) > 0 && g.graded_possible + g.remaining_points > 0
+        );
+        const weightSum = contributing.reduce((n, g) => n + (g.weight ?? 0), 0);
+        let A = 0;
+        let B = 0;
+        for (const g of contributing) {
+          const total = g.graded_possible + g.remaining_points;
+          A += (g.weight ?? 0) * (g.earned / total);
+          B += (g.weight ?? 0) * (g.remaining_points / total);
+        }
+        A = (A / weightSum) * 100;
+        B = B / weightSum;
+        const needed = B > 0 ? (target_grade - A) / B : null;
+        whatIf = {
+          target: target_grade,
+          needed_average_on_remaining_percent: needed == null ? null : round2(needed),
+          achievable: needed == null ? null : needed <= 100,
+          note:
+            needed == null
+              ? "No remaining weighted work to model."
+              : needed <= 0
+                ? "Already secured — even a zero on everything remaining keeps you at or above the target."
+                : needed > 100
+                  ? "Not reachable with perfect scores on the remaining work as currently posted."
+                  : `Average ${round2(needed)}% across all remaining graded work to finish at ${target_grade}%.`,
+        };
+      } else {
+        const totalPossible = totalGradedPossible + totalRemaining;
+        const pointsNeeded = (target_grade / 100) * totalPossible - totalEarned;
+        const needed = (pointsNeeded / totalRemaining) * 100;
+        whatIf = {
+          target: target_grade,
+          points_needed_from_remaining: round2(pointsNeeded),
+          remaining_points: totalRemaining,
+          needed_average_on_remaining_percent: round2(needed),
+          achievable: needed <= 100,
+          note:
+            needed <= 0
+              ? "Already secured — even a zero on everything remaining keeps you at or above the target."
+              : needed > 100
+                ? "Not reachable with perfect scores on the remaining work as currently posted."
+                : `Earn ${round2(pointsNeeded)} of the ${totalRemaining} remaining points (${round2(needed)}% average).`,
+        };
+      }
+    }
+
+    return jsonResult({
+      course: course.name,
+      grading_mode: weighted ? "weighted by assignment group" : "total points",
+      current_grade_computed: current,
+      canvas_reported_current_score: canvasScore,
+      canvas_reported_current_grade: course.enrollments?.[0]?.computed_current_grade ?? null,
+      groups: groups.map((g) => ({
+        name: g.name,
+        ...(weighted ? { weight_percent: g.weight } : {}),
+        graded: g.graded_possible > 0 ? `${round2(g.earned)}/${g.graded_possible}` : "nothing graded yet",
+        percentage: g.percentage,
+        ungraded_points_remaining: g.remaining_points,
+      })),
+      totals: {
+        earned: round2(totalEarned),
+        graded_points_possible: totalGradedPossible,
+        ungraded_points_remaining: totalRemaining,
+      },
+      ...(whatIf ? { what_if: whatIf } : {}),
+      ...(caveats.length ? { caveats } : {}),
+    });
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Planner
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "canvas_list_planner",
+  {
+    title: "Planner feed",
+    description:
+      "Canvas planner feed across all courses — assignments, quizzes, discussions, announcements, and calendar events " +
+      "in date order, each flagged with whether it has new activity and your submission state. Richer than canvas_list_todo.",
+    inputSchema: {
+      days_ahead: z.number().min(1).max(120).optional().describe("How far forward to look; default 14"),
+      days_back: z.number().min(0).max(60).optional().describe("How far back to include; default 0"),
+      new_activity_only: z.boolean().optional().describe("Only items Canvas flags as having new activity"),
+    },
+    annotations: READ_ONLY,
+  },
+  safe(async ({ days_ahead, days_back, new_activity_only }) => {
+    const day = 86400_000;
+    const start = new Date(Date.now() - (days_back ?? 0) * day).toISOString().slice(0, 10);
+    const end = new Date(Date.now() + (days_ahead ?? 14) * day).toISOString().slice(0, 10);
+
+    const { items, truncated } = await canvasGetPaginated("/planner/items", {
+      start_date: start,
+      end_date: end,
+    });
+
+    const rows = items
+      .filter((i: any) => !new_activity_only || i.new_activity)
+      .map((i: any) => {
+        const sub = i.submissions;
+        return {
+          type: i.plannable_type,
+          title: i.plannable?.title ?? i.plannable?.name,
+          date: i.plannable_date,
+          course: i.context_name,
+          course_id: i.course_id,
+          points_possible: i.plannable?.points_possible ?? undefined,
+          new_activity: i.new_activity || undefined,
+          status: sub
+            ? sub.missing
+              ? "missing"
+              : sub.graded
+                ? "graded"
+                : sub.submitted
+                  ? "submitted"
+                  : sub.late
+                    ? "late"
+                    : "not submitted"
+            : undefined,
+          url: i.html_url ? `${baseUrl()}${i.html_url}` : undefined,
+        };
+      });
+
+    if (rows.length === 0) {
+      return textResult(
+        `Nothing in the planner between ${start} and ${end}` +
+          (new_activity_only ? " with new activity." : ".")
+      );
+    }
+    return jsonResult(rows, truncNote(truncated, "planner items"));
   })
 );
 
