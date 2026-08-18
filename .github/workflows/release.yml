@@ -64,11 +64,12 @@ jobs:
       - name: Inspect package contents
         run: npm pack --dry-run
 
-      # Trusted Publishing (OIDC) needs npm 11.5.1+; Node 20 ships npm 10.x.
-      # Harmless when publishing with a token.
+      # Trusted Publishing (OIDC) needs npm 11.5.1+, and Node 20 ships npm 10.x.
+      # Pinned to the 11 line on purpose: npm@latest is 12.x, which requires
+      # Node >=22.22.2 and cannot install on this runner.
       - name: Use an npm that supports OIDC publishing
         if: startsWith(github.ref, 'refs/tags/')
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       # No token: npm exchanges the workflow's OIDC identity for short-lived
       # credentials via Trusted Publishing, configured on the package at npmjs.com.
