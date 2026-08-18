@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-const EXPECTED_TOOL_COUNT = 29;
+const EXPECTED_TOOL_COUNT = 30;
 
 const server = spawn("node", ["dist/index.js"], {
   env: {
@@ -15,6 +15,8 @@ const server = spawn("node", ["dist/index.js"], {
     CANVAS_API_TOKEN: "",
     CANVAS_COOKIE: "",
     CANVAS_BASE_URL: "https://school.example.instructure.com",
+    // Keep the test hermetic: never pick up a real Keychain credential.
+    CANVAS_NO_KEYCHAIN: "1",
   },
   stdio: ["pipe", "pipe", "ignore"],
 });
@@ -81,6 +83,23 @@ rl.on("line", (line) => {
     const text = result.content?.[0]?.text ?? "";
     if (!/credentials/i.test(text)) fail(`error message not actionable: ${text.slice(0, 120)}`);
     console.log("ok: credential-less call returns actionable error (no crash)");
+    send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "canvas_auth_status", arguments: {} },
+    });
+  }
+
+  // canvas_auth_status is a diagnostic: it must REPORT a bad credential state
+  // rather than throwing, so it still works when everything else is broken.
+  if (msg.id === 4) {
+    const result = msg.result;
+    if (result?.isError) fail("canvas_auth_status should report status, not error");
+    const text = result.content?.[0]?.text ?? "";
+    if (!/not_configured/.test(text)) fail(`expected status not_configured, got: ${text.slice(0, 160)}`);
+    if (!/action_required/.test(text)) fail("auth status missing action_required guidance");
+    console.log("ok: canvas_auth_status reports not_configured with remediation");
     clearTimeout(timeout);
     server.kill();
     console.log("PASS");

@@ -60,6 +60,7 @@ Token auth is still supported if your school allows it — the cookie is the fal
 | `canvas_get_module_progress` | Module completion state and what each item still requires |
 | `canvas_list_peer_reviews` | Peer reviews assigned to you |
 | `canvas_export_course` | One-shot markdown export of an entire course — built for Notion archiving |
+| `canvas_auth_status` | Diagnose the connection: which credential, stored where, still valid? |
 
 Three of these are worth calling out.
 
@@ -68,6 +69,14 @@ Three of these are worth calling out.
 See [ROADMAP.md](ROADMAP.md) for what's planned next and why writes are deliberately out of scope.
 
 ## Quick start
+
+No install needed — `npx` fetches it on demand:
+
+```bash
+npx canvas-student-mcp
+```
+
+Or from source:
 
 ```bash
 git clone https://github.com/xmike04/canvas-student-mcp.git
@@ -88,15 +97,33 @@ npm install && npm run build
 
 Either credential grants read access to your Canvas account. Treat it like a password.
 
+### Store the credential (macOS: use the Keychain)
+
+MCP client configs are plaintext JSON. On macOS you can keep the credential out of them entirely:
+
+```bash
+security add-generic-password -s canvas-student-mcp -a cookie -w 'canvas_session=PASTE_VALUE_HERE' -U
+```
+
+Use `-a token` instead of `-a cookie` for an API token. The server checks environment variables first, then the Keychain, so this is opt-in and nothing breaks if you skip it. `CANVAS_NO_KEYCHAIN=1` disables the lookup.
+
 ### Register with Claude
 
-**Claude Code:**
+**Claude Code** — with the credential in the Keychain, the config holds no secret at all:
+
+```bash
+claude mcp add canvas --scope user \
+  --env CANVAS_BASE_URL=https://yourschool.instructure.com \
+  -- npx -y canvas-student-mcp
+```
+
+Passing the credential inline instead of using the Keychain:
 
 ```bash
 claude mcp add canvas --scope user \
   --env 'CANVAS_COOKIE=canvas_session=PASTE_VALUE_HERE' \
   --env CANVAS_BASE_URL=https://yourschool.instructure.com \
-  -- node /absolute/path/to/canvas-student-mcp/dist/index.js
+  -- npx -y canvas-student-mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
@@ -119,6 +146,20 @@ claude mcp add canvas --scope user \
 Use `CANVAS_API_TOKEN` instead of `CANVAS_COOKIE` for token auth (token wins if both are set). Verify with: *"check my Canvas profile."*
 
 When the cookie expires (your browser session ends), every tool tells you plainly — re-copy and update the config. With "stay signed in" checked, sessions typically last weeks.
+
+## Agent skills
+
+Three packaged workflows ship in [`skills/`](skills/). Copy any of them into `~/.claude/skills/` (or your project's `.claude/skills/`) and Claude will use them automatically when the request fits:
+
+| Skill | What it does |
+|---|---|
+| `canvas-morning-check` | Daily briefing: what's due, new announcements, unread messages, new grades |
+| `canvas-week-plan` | Reads the actual assignments and builds a day-by-day plan for the week |
+| `canvas-grade-check` | Grade standing plus what-if answers, with the caveats carried through |
+
+```bash
+cp -R skills/canvas-morning-check ~/.claude/skills/
+```
 
 ## Things to ask once connected
 
@@ -146,9 +187,10 @@ The smoke test runs entirely offline — CI needs no Canvas account.
 
 ## Security model
 
-- Read-only: every Canvas call is a GET; no tool can write to Canvas.
-- Credentials live only in your MCP client's env config — never on disk in this repo, never transmitted anywhere but your school's Canvas domain.
+- Read-only: every Canvas call is a GET; no tool can write to Canvas. Even reading your inbox leaves messages unread.
+- Credentials live in your MCP client's env config or the macOS Keychain — never on disk in this repo, never transmitted anywhere but your school's Canvas domain. File downloads follow redirects manually so credentials are never forwarded to a CDN.
 - Rotate at will: log out of Canvas (or revoke the token) and the credential is dead everywhere.
+- `canvas_auth_status` tells you which credential is in use, where it's stored, and whether it still works.
 
 ## License
 

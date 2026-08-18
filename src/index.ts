@@ -6,7 +6,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { canvasGet, canvasGetPaginated, canvasDownload, baseUrl } from "./canvas.js";
+import {
+  canvasGet,
+  canvasGetPaginated,
+  canvasDownload,
+  baseUrl,
+  credentials,
+  KEYCHAIN_SERVICE,
+} from "./canvas.js";
 import { htmlToText, trimQuotedReply } from "./html.js";
 import { extractFileText } from "./extract.js";
 
@@ -121,6 +128,72 @@ async function activeCourseContextCodes(): Promise<{ codes: string[]; names: Rec
 // ---------------------------------------------------------------------------
 // Identity / sanity check
 // ---------------------------------------------------------------------------
+
+server.registerTool(
+  "canvas_auth_status",
+  {
+    title: "Check credential status",
+    description:
+      "Diagnose the Canvas connection: which credential is in use, where it's stored, and whether it still works. " +
+      "Run this first when something fails, or before a scheduled job, to distinguish an expired session from a real error.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  },
+  // Deliberately not wrapped in safe(): this tool reports failures as its
+  // result rather than erroring, so it stays useful when auth is broken.
+  async () => {
+    const url = process.env.CANVAS_BASE_URL;
+    const creds = credentials();
+    const method = creds.token ? "API token" : creds.cookie ? "session cookie" : "none";
+
+    const report: Record<string, unknown> = {
+      canvas_url: url ?? "(CANVAS_BASE_URL not set)",
+      auth_method: method,
+      credential_source: creds.source,
+    };
+
+    if (!url) {
+      report.status = "not_configured";
+      report.action_required =
+        "Set CANVAS_BASE_URL to your school's Canvas domain (e.g. https://unt.instructure.com).";
+      return jsonResult(report);
+    }
+    if (creds.source === "none") {
+      report.status = "not_configured";
+      report.action_required =
+        `No credential found. Set CANVAS_COOKIE or CANVAS_API_TOKEN in the MCP config, or store one in the Keychain: ` +
+        `security add-generic-password -s ${KEYCHAIN_SERVICE} -a cookie -w '<value>' -U`;
+      return jsonResult(report);
+    }
+
+    // A cookie header without canvas_session is the most common paste mistake.
+    if (creds.cookie && !/(^|;|\s)canvas_session=/.test(creds.cookie)) {
+      report.warning =
+        "The cookie value does not contain a 'canvas_session=' pair. Copy the full cookie header, " +
+        "or at minimum the canvas_session=... pair.";
+    }
+
+    try {
+      const p = await canvasGet("/users/self/profile");
+      report.status = "ok";
+      report.authenticated_as = { id: p.id, name: p.name, login_id: p.login_id };
+      if (creds.cookie) {
+        report.note =
+          "Session cookies expire when the browser session ends. If calls start failing, re-copy the cookie.";
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      report.status = /expired|redirect|401|non-JSON/i.test(message) ? "expired" : "error";
+      report.detail = message;
+      report.action_required = creds.token
+        ? `Generate a new access token at ${baseUrl()}/profile/settings and update the MCP config.`
+        : `Log into ${baseUrl()} in your browser, re-copy the 'cookie:' header from DevTools → Network, ` +
+          `and update ${creds.source === "macOS Keychain" ? `the Keychain entry: security add-generic-password -s ${KEYCHAIN_SERVICE} -a cookie -w '<new value>' -U` : "CANVAS_COOKIE in the MCP config"}.`;
+    }
+
+    return jsonResult(report);
+  }
+);
 
 server.registerTool(
   "canvas_get_profile",

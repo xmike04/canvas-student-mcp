@@ -5,8 +5,61 @@
  *  - CANVAS_API_TOKEN — personal access token (if your school allows generating one)
  *  - CANVAS_COOKIE    — the browser session Cookie header, for schools that disable
  *                       self-service tokens. Copy it from DevTools while logged in.
+ *
+ * Both may live in the macOS Keychain instead of the environment, which keeps the
+ * credential out of the MCP client's plaintext config file. Environment variables
+ * win when both are present. Set CANVAS_NO_KEYCHAIN=1 to skip Keychain entirely.
+ *
  * Base URL: CANVAS_BASE_URL env var — your school's Canvas domain.
  */
+import { execFileSync } from "node:child_process";
+
+export const KEYCHAIN_SERVICE = "canvas-student-mcp";
+
+export type CredentialSource = "environment variable" | "macOS Keychain" | "none";
+
+type Credentials = {
+  token?: string;
+  cookie?: string;
+  source: CredentialSource;
+};
+
+let cached: Credentials | null = null;
+
+/** Read one secret from the macOS Keychain; undefined when absent or unavailable. */
+function keychainGet(account: string): string | undefined {
+  if (process.platform !== "darwin" || process.env.CANVAS_NO_KEYCHAIN) return undefined;
+  try {
+    const value = execFileSync(
+      "security",
+      ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+    ).trim();
+    return value || undefined;
+  } catch {
+    // Not found, locked, or `security` unavailable — fall through to env vars.
+    return undefined;
+  }
+}
+
+/** Resolve credentials once per process: environment first, then Keychain. */
+export function credentials(): Credentials {
+  if (cached) return cached;
+
+  const envToken = process.env.CANVAS_API_TOKEN;
+  const envCookie = process.env.CANVAS_COOKIE;
+  if (envToken || envCookie) {
+    cached = { token: envToken, cookie: envCookie, source: "environment variable" };
+    return cached;
+  }
+
+  const kcToken = keychainGet("token");
+  const kcCookie = keychainGet("cookie");
+  cached = kcToken || kcCookie
+    ? { token: kcToken, cookie: kcCookie, source: "macOS Keychain" }
+    : { source: "none" };
+  return cached;
+}
 
 export function baseUrl(): string {
   const url = process.env.CANVAS_BASE_URL;
@@ -24,21 +77,22 @@ export type QueryParams = Record<
   string | number | boolean | Array<string | number> | undefined
 >;
 
-function usingCookieAuth(): boolean {
-  return !process.env.CANVAS_API_TOKEN && !!process.env.CANVAS_COOKIE;
+export function usingCookieAuth(): boolean {
+  const c = credentials();
+  return !c.token && !!c.cookie;
 }
 
 function authHeaders(): Record<string, string> {
-  const token = process.env.CANVAS_API_TOKEN;
-  if (token) return { Authorization: `Bearer ${token}` };
-
-  const cookie = process.env.CANVAS_COOKIE;
-  if (cookie) return { Cookie: cookie };
+  const c = credentials();
+  if (c.token) return { Authorization: `Bearer ${c.token}` };
+  if (c.cookie) return { Cookie: c.cookie };
 
   throw new Error(
     "No Canvas credentials configured. Set CANVAS_API_TOKEN (a personal access token), or — if your school " +
       `disables token generation — set CANVAS_COOKIE: log into ${baseUrl()} in your browser, open DevTools → ` +
-      "Network tab, refresh, click any request to the Canvas domain, and copy the full 'cookie:' request header value."
+      "Network tab, refresh, click any request to the Canvas domain, and copy the full 'cookie:' request header value. " +
+      "On macOS you can store it in the Keychain instead of the config file: " +
+      `security add-generic-password -s ${KEYCHAIN_SERVICE} -a cookie -w '<value>' -U`
   );
 }
 

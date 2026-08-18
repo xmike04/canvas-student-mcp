@@ -20,13 +20,18 @@ Courses, syllabus, assignments with submission status, grades, announcements, mo
 
 Building this surfaced a second cookie-auth quirk: Canvas omits the `verifier=` param from file URLs for cookie sessions, so downloads return `500` unless the session cookie is attached. Download redirects are now followed by hand so credentials stop at the Canvas host and are never forwarded to a CDN.
 
+### v1.3 — Tier 3 (distribution & operations)
+- **npm packaging** — published as `canvas-student-mcp`, so setup is `npx -y canvas-student-mcp` with no clone or build step. Verified by installing the packed tarball into a clean prefix and running the resulting binary.
+- **macOS Keychain credential storage** — the server reads `CANVAS_COOKIE`/`CANVAS_API_TOKEN` from the environment first, then falls back to the Keychain, so the MCP client's plaintext config can hold nothing but the Canvas URL. Opt-in and non-breaking; `CANVAS_NO_KEYCHAIN=1` disables it (the test suite sets this to stay hermetic).
+- **`canvas_auth_status`** — reports which credential is in use, where it's stored, and whether it still authenticates. It reports failures as its result instead of throwing, so it stays useful precisely when everything else is broken; scheduled jobs call it first to distinguish an expired session from a real error.
+- **Agent skills** — `canvas-morning-check`, `canvas-week-plan`, and `canvas-grade-check` ship in `skills/`.
+
 ## Planned
 
-### Tier 3 — distribution & operations
-- **npm publish** so installation is `npx canvas-student-mcp`.
-- **Agent skills / prompt recipes** — packaged workflows ("morning check", "week plan") in the style other Canvas MCP servers ship.
-- **Keychain credential storage** instead of plaintext in the MCP client config.
-- **`canvas_auth_status`** — report session validity and staleness so scheduled jobs can warn before a sync fails on an expired cookie.
+- **Windows and Linux credential stores** — `wincred` and `libsecret`, mirroring the macOS Keychain support.
+- **Automated cookie refresh** — the one real friction point left. A browser-extension or headless-session handoff would remove the manual DevTools copy when a session expires.
+- **Quiz and exam detail** — question counts, time limits, and attempt history are exposed but not yet surfaced as their own tool.
+- **Cross-course search** — one query across announcements, files, and pages; needs to be built on the existing tools rather than a new endpoint.
 
 ## Explicitly out of scope: writes
 
